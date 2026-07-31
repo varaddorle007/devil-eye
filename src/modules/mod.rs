@@ -1,13 +1,15 @@
-//! Metasploit-style module registry — authorized auxiliary modules only.
+//! Module registry — authorized auxiliary modules only.
 
 pub mod detect_cmd;
 pub mod diff_cmd;
 pub mod enum_svc;
 pub mod export_cmd;
 pub mod import_cmd;
+pub mod merge_cmd;
 pub mod report_cmd;
 pub mod scan;
 pub mod session_cmd;
+pub mod slice_cmd;
 pub mod watch_cmd;
 
 /// Module risk / capability class.
@@ -50,15 +52,15 @@ pub fn catalog() -> Vec<ModuleInfo> {
             requires_scope: false,
         },
         ModuleInfo {
-            name: "scan/tcp_connect",
+            name: "scan/tcp_udp",
             kind: RiskClass::Auxiliary,
-            summary: "Allowlisted TCP connect scan with rate limits and audit log",
+            summary: "Allowlisted TCP connect + UDP datagram probes (scope required; no exploits)",
             requires_scope: true,
         },
         ModuleInfo {
             name: "enum/banner_tls",
             kind: RiskClass::Auxiliary,
-            summary: "Service banners + TLS certificate metadata (no session decryption)",
+            summary: "Service banners + TLS leaf cert metadata/fingerprint (no session decryption)",
             requires_scope: true,
         },
         ModuleInfo {
@@ -92,6 +94,18 @@ pub fn catalog() -> Vec<ModuleInfo> {
             requires_scope: false,
         },
         ModuleInfo {
+            name: "merge/captures",
+            kind: RiskClass::Passive,
+            summary: "Chronologically merge offline PCAP / PCAPNG files",
+            requires_scope: false,
+        },
+        ModuleInfo {
+            name: "slice/captures",
+            kind: RiskClass::Passive,
+            summary: "Slice offline PCAP / PCAPNG by Unix-time window",
+            requires_scope: false,
+        },
+        ModuleInfo {
             name: "session",
             kind: RiskClass::Passive,
             summary: "Multi-operator engagement sessions (scope-ticket authenticated)",
@@ -108,9 +122,9 @@ pub fn catalog() -> Vec<ModuleInfo> {
 
 /// Print module catalog to stdout.
 pub fn print_catalog() {
-    println!("Devil Eye modules (authorized use only)");
-    println!("---------------------------------------");
-    println!("This is NOT Metasploit: no exploit payloads, no credential theft, no malware.");
+    println!("Modules (authorized use only)");
+    println!("-----------------------------");
+    println!("Authorized modules only — no exploit payloads.");
     println!();
     for m in catalog() {
         let risk = match m.kind {

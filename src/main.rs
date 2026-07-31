@@ -11,14 +11,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use devil_eye::audit::AuditLog;
-use devil_eye::capture::{list_interfaces, open_source, RawPacket};
+use devil_eye::capture::{list_interfaces, open_source};
 use devil_eye::cli::{CaptureArgs, Cli, Commands};
 use devil_eye::decode::decode_packet;
 use devil_eye::modules::{
-    self, detect_cmd, diff_cmd, enum_svc, export_cmd, import_cmd, report_cmd, scan, session_cmd,
-    watch_cmd,
+    self, detect_cmd, diff_cmd, enum_svc, export_cmd, import_cmd, merge_cmd, report_cmd, scan,
+    session_cmd, slice_cmd, watch_cmd,
 };
-use devil_eye::output::print_packet;
+use devil_eye::output::{format_timestamp, print_packet, TsMode, TsState};
 use devil_eye::scope::Scope;
 use devil_eye::stats::TrafficStats;
 
@@ -31,7 +31,52 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let use_color = devil_eye::banner::want_color(cli.no_color);
     match cli.command {
+        Some(cmd) => {
+            devil_eye::banner::maybe_print(cli.no_banner, use_color);
+            dispatch(cmd)
+        }
+        None => run_interactive(cli.no_banner, use_color),
+    }
+}
+
+fn run_interactive(no_banner: bool, use_color: bool) -> Result<()> {
+    devil_eye::banner::maybe_print(no_banner, use_color);
+    loop {
+        match devil_eye::console::prompt_selection(use_color)? {
+            None => {
+                eprintln!("bye.");
+                return Ok(());
+            }
+            Some(tokens) => {
+                // Re-parse as: devil-eye <tokens...>
+                let mut argv = vec!["devil-eye".to_string()];
+                argv.extend(tokens);
+                match Cli::try_parse_from(&argv) {
+                    Ok(parsed) => match parsed.command {
+                        Some(cmd) => {
+                            if let Err(err) = dispatch(cmd) {
+                                eprintln!("devil-eye: {err:#}");
+                            }
+                        }
+                        None => {
+                            eprintln!("pick a module command (not the bare launcher)");
+                        }
+                    },
+                    Err(err) => {
+                        // Clap help/usage goes to stderr via this Display.
+                        eprintln!("{err}");
+                    }
+                }
+                eprintln!();
+            }
+        }
+    }
+}
+
+fn dispatch(command: Commands) -> Result<()> {
+    match command {
         Commands::Capture(args) => run_capture(args),
         Commands::Scan(args) => scan::run(&args),
         Commands::Enum(args) => enum_svc::run(&args),
@@ -40,6 +85,8 @@ fn run() -> Result<()> {
         Commands::Export(args) => export_cmd::run(&args),
         Commands::Import(args) => import_cmd::run(&args),
         Commands::Diff(args) => diff_cmd::run(&args),
+        Commands::Merge(args) => merge_cmd::run(&args),
+        Commands::Slice(args) => slice_cmd::run(&args),
         Commands::Session(args) => session_cmd::run(&args),
         Commands::Report(args) => report_cmd::run(&args),
         Commands::Modules => {
@@ -107,6 +154,8 @@ fn run_capture(args: CaptureArgs) -> Result<()> {
     let mut last_stats = Instant::now();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let mut ts_state = TsState::new();
+    let ts_mode = TsMode::from_count(args.timestamp);
 
     while running.load(Ordering::SeqCst) {
         if let Some(limit) = args.count {
@@ -141,7 +190,7 @@ fn run_capture(args: CaptureArgs) -> Result<()> {
             Ok(decoded) => {
                 stats.record(&decoded, packet.data.len());
                 if !args.quiet {
-                    print_packet(&mut out, &packet, &decoded, &args)?;
+                    print_packet(&mut out, &packet, &decoded, &args, &mut ts_state)?;
                 }
                 printed += 1;
             }
@@ -149,12 +198,20 @@ fn run_capture(args: CaptureArgs) -> Result<()> {
                 decode_failures += 1;
                 stats.record_raw(packet.data.len());
                 if args.verbose > 0 && !args.quiet {
-                    writeln!(
-                        out,
-                        "{} truncated-or-malformed frame ({} bytes)",
-                        format_ts(&packet),
-                        packet.data.len()
-                    )?;
+                    let ts = format_timestamp(&packet, ts_mode, &mut ts_state);
+                    if ts.is_empty() {
+                        writeln!(
+                            out,
+                            "truncated-or-malformed frame ({} bytes)",
+                            packet.data.len()
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "{ts} truncated-or-malformed frame ({} bytes)",
+                            packet.data.len()
+                        )?;
+                    }
                 }
                 printed += 1;
             }
@@ -197,7 +254,17 @@ fn print_interfaces() -> Result<()> {
     let ifaces = list_interfaces()?;
     if ifaces.is_empty() {
         println!("No capture interfaces found.");
-        println!("On Windows, install Npcap and rebuild with `--features live`.");
+        #[cfg(target_os = "windows")]
+        {
+            println!("Install the Npcap runtime from https://npcap.com/ (elevated terminal).");
+            println!("If this binary was built offline-only, run: .\\scripts\\build-release.ps1");
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            println!("Install libpcap and rebuild, then re-run with sufficient privileges:");
+            println!("  ./scripts/build-release.sh");
+            println!("  sudo ./target/release/devil-eye capture -D");
+        }
         return Ok(());
     }
     for (idx, iface) in ifaces.iter().enumerate() {
@@ -212,10 +279,6 @@ fn print_interfaces() -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn format_ts(packet: &RawPacket) -> String {
-    format!("{}.{:06}", packet.timestamp_secs, packet.timestamp_usecs)
 }
 
 fn is_timeout(err: &anyhow::Error) -> bool {
@@ -247,6 +310,7 @@ mod tests {
             count: None,
             filter: None,
             numeric: false,
+            timestamp: 0,
             verbose: 0,
             stats: false,
             quiet: false,
@@ -272,6 +336,7 @@ mod tests {
             count: Some(10),
             filter: None,
             numeric: true,
+            timestamp: 0,
             verbose: 1,
             stats: true,
             quiet: false,

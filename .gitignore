@@ -1,5 +1,6 @@
 /target/
 dist/
+.npcap-sdk/
 **/*.rs.bk
 *.pcap
 !tests/fixtures/*.pcap

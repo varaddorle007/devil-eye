@@ -79,6 +79,70 @@ impl PcapWriter {
     }
 }
 
+/// Sink that appends packets to a minimal little-endian PCAPNG (SHB + IDB + EPBs).
+pub struct PcapNgWriter {
+    writer: BufWriter<File>,
+}
+
+impl PcapNgWriter {
+    pub fn create(path: &Path, snaplen: u32) -> Result<Self> {
+        let file = File::create(path)
+            .with_context(|| format!("failed to create PCAPNG file {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        write_pcapng_shb(&mut writer)?;
+        write_pcapng_idb(&mut writer, snaplen)?;
+        Ok(Self { writer })
+    }
+
+    pub fn write_packet(&mut self, packet: &RawPacket) -> Result<()> {
+        write_pcapng_epb(&mut self.writer, packet)?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+/// Unified capture file writer (classical PCAP or PCAPNG).
+pub enum CaptureWriter {
+    Classic(PcapWriter),
+    PcapNg(PcapNgWriter),
+}
+
+impl CaptureWriter {
+    /// Choose format from path extension: `.pcapng` → PCAPNG, otherwise classical PCAP.
+    pub fn create(path: &Path, snaplen: u32) -> Result<Self> {
+        if is_pcapng_path(path) {
+            Ok(Self::PcapNg(PcapNgWriter::create(path, snaplen)?))
+        } else {
+            Ok(Self::Classic(PcapWriter::create(path, snaplen)?))
+        }
+    }
+
+    pub fn write_packet(&mut self, packet: &RawPacket) -> Result<()> {
+        match self {
+            Self::Classic(w) => w.write_packet(packet),
+            Self::PcapNg(w) => w.write_packet(packet),
+        }
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        match self {
+            Self::Classic(w) => w.flush(),
+            Self::PcapNg(w) => w.flush(),
+        }
+    }
+}
+
+/// True when the path should be written as PCAPNG.
+pub fn is_pcapng_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pcapng"))
+}
+
 /// Unified packet source (live or offline).
 pub enum PacketSource {
     Offline(OfflineSource),
@@ -98,14 +162,14 @@ impl PacketSource {
         }
     }
 
-    pub fn open_writer(&self, path: &Path) -> Result<PcapWriter> {
+    pub fn open_writer(&self, path: &Path) -> Result<CaptureWriter> {
         let snaplen = match self {
             Self::Offline(src) => src.snaplen,
             Self::OfflineSoft(src) => src.inner.snaplen,
             #[cfg(feature = "live")]
             Self::Live(src) => src.snaplen,
         };
-        PcapWriter::create(path, snaplen)
+        CaptureWriter::create(path, snaplen)
     }
 
     pub fn capture_stats(&mut self) -> Result<CaptureStats> {
@@ -315,15 +379,23 @@ impl LiveSource {
             .as_deref()
             .context("live capture requires -i/--interface")?;
 
-        let inactive = pcap::Capture::from_device(name)
-            .with_context(|| format!("failed to open interface '{name}'"))?
+        let inactive = pcap::Capture::from_device(name).map_err(|err| {
+            anyhow::anyhow!(live_runtime_help(
+                "live capture",
+                &anyhow::Error::msg(err.to_string())
+            ))
+        })?;
+        let inactive = inactive
             .promisc(args.promisc)
             .snaplen(args.snaplen)
             .timeout(args.timeout_ms);
 
-        let mut capture = inactive
-            .open()
-            .with_context(|| format!("failed to activate capture on '{name}'"))?;
+        let mut capture = inactive.open().map_err(|err| {
+            anyhow::anyhow!(live_runtime_help(
+                &format!("activate capture on '{name}'"),
+                &anyhow::Error::msg(err.to_string())
+            ))
+        })?;
 
         if let Some(filter) = &args.filter {
             capture
@@ -422,12 +494,24 @@ pub fn open_source(args: &Args) -> Result<PacketSource> {
 #[cfg(not(feature = "live"))]
 fn live_feature_help(action: &str) -> String {
     format!(
-        "{action} requires building with `--features live` and installing \
-Npcap (Windows) or libpcap (Unix).\n\
-  Windows: https://npcap.com/ — install Npcap + SDK, set LIB to the SDK Lib folder,\n\
-  then: cargo build --release --features live\n\
-Without live support you can still use -r/--read to replay PCAP/PCAPNG files \
-(and -f with the built-in offline filter subset)."
+        "{action} needs the `live` feature (Npcap on Windows / libpcap on Unix).\n\
+  This binary was built with `--no-default-features` (offline-only).\n\
+  Windows (recommended):\n\
+    1) Install Npcap runtime: https://npcap.com/\n\
+    2) .\\scripts\\build-release.ps1\n\
+  Or: set LIB to the Npcap SDK Lib\\x64 folder, then `cargo build --release`\n\
+  Linux/macOS: ./scripts/build-release.sh (needs libpcap-dev / brew libpcap)\n\
+  Offline replay still works: -r/--read PCAP/PCAPNG (+ software -f filter)."
+    )
+}
+
+#[cfg(feature = "live")]
+fn live_runtime_help(action: &str, err: &anyhow::Error) -> String {
+    format!(
+        "{action} failed: {err:#}\n\
+  Windows: install Npcap runtime (https://npcap.com/) and re-run elevated.\n\
+  Linux/macOS: install libpcap, rebuild with ./scripts/build-release.sh, then sudo for -i/-D.\n\
+  List interfaces: devil-eye capture -D"
     )
 }
 
@@ -439,6 +523,58 @@ fn write_global_header(w: &mut impl Write, snaplen: u32) -> Result<()> {
     w.write_all(&0u32.to_le_bytes())?; // sigfigs
     w.write_all(&snaplen.to_le_bytes())?;
     w.write_all(&LINKTYPE_ETHERNET.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_pcapng_shb(w: &mut impl Write) -> Result<()> {
+    // type(4) + len(4) + BOM(4) + major(2) + minor(2) + section_len(8) + trailing_len(4) = 28
+    let total: u32 = 28;
+    w.write_all(&BLOCK_SHB.to_le_bytes())?;
+    w.write_all(&total.to_le_bytes())?;
+    w.write_all(&0x1a2b_3c4du32.to_le_bytes())?; // byte-order magic
+    w.write_all(&1u16.to_le_bytes())?; // major
+    w.write_all(&0u16.to_le_bytes())?; // minor
+    w.write_all(&u64::MAX.to_le_bytes())?; // section length unknown
+    w.write_all(&total.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_pcapng_idb(w: &mut impl Write, snaplen: u32) -> Result<()> {
+    // type(4) + len(4) + linktype(2) + reserved(2) + snaplen(4) + trailing(4) = 20
+    let total: u32 = 20;
+    w.write_all(&BLOCK_IDB.to_le_bytes())?;
+    w.write_all(&total.to_le_bytes())?;
+    w.write_all(&(LINKTYPE_ETHERNET as u16).to_le_bytes())?;
+    w.write_all(&0u16.to_le_bytes())?;
+    w.write_all(&snaplen.to_le_bytes())?;
+    w.write_all(&total.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_pcapng_epb(w: &mut impl Write, packet: &RawPacket) -> Result<()> {
+    let caplen = u32::try_from(packet.data.len()).unwrap_or(u32::MAX);
+    let pad = align4(packet.data.len()) - packet.data.len();
+    // hdr after type/len: iface(4)+ts_hi(4)+ts_lo(4)+cap(4)+orig(4) = 20
+    // + data + pad + trailing(4); plus type(4)+len(4) at start
+    let total = u32::try_from(8 + 20 + packet.data.len() + pad + 4).unwrap_or(u32::MAX);
+    let ts = u64::from(packet.timestamp_secs)
+        .saturating_mul(1_000_000)
+        .saturating_add(u64::from(packet.timestamp_usecs));
+    let ts_high = (ts >> 32) as u32;
+    let ts_low = ts as u32;
+
+    w.write_all(&BLOCK_EPB.to_le_bytes())?;
+    w.write_all(&total.to_le_bytes())?;
+    w.write_all(&0u32.to_le_bytes())?; // interface id
+    w.write_all(&ts_high.to_le_bytes())?;
+    w.write_all(&ts_low.to_le_bytes())?;
+    w.write_all(&caplen.to_le_bytes())?;
+    w.write_all(&packet.orig_len.to_le_bytes())?;
+    w.write_all(&packet.data)?;
+    if pad > 0 {
+        w.write_all(&[0u8; 3][..pad])?;
+    }
+    w.write_all(&total.to_le_bytes())?;
     Ok(())
 }
 
@@ -714,6 +850,34 @@ mod tests {
         assert_eq!(got.data, pkt.data);
         assert_eq!(got.timestamp_secs, pkt.timestamp_secs);
         assert_eq!(got.timestamp_usecs, pkt.timestamp_usecs);
+        assert!(src.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn roundtrip_pcapng_write_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.pcapng");
+
+        let pkt = RawPacket {
+            timestamp_secs: 1_700_000_000,
+            timestamp_usecs: 123_456,
+            orig_len: 5,
+            data: vec![0x01, 0x02, 0x03, 0x04, 0x05], // odd length → padding
+        };
+
+        {
+            let mut w = CaptureWriter::create(&path, 65535).unwrap();
+            assert!(matches!(w, CaptureWriter::PcapNg(_)));
+            w.write_packet(&pkt).unwrap();
+            w.flush().unwrap();
+        }
+
+        let mut src = OfflineSource::open(&path).unwrap();
+        let got = src.next_packet().unwrap().unwrap();
+        assert_eq!(got.data, pkt.data);
+        assert_eq!(got.timestamp_secs, pkt.timestamp_secs);
+        assert_eq!(got.timestamp_usecs, pkt.timestamp_usecs);
+        assert_eq!(got.orig_len, pkt.orig_len);
         assert!(src.next_packet().unwrap().is_none());
     }
 

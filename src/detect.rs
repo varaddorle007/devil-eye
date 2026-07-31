@@ -15,6 +15,7 @@ const MAX_HOSTS_PER_SRC: usize = 256;
 const MAX_DNS_NAMES_PER_SRC: usize = 256;
 const MAX_CORR_BUCKETS: usize = 2048;
 const MAX_CORR_UNIQUES: usize = 256;
+const MAX_COOLDOWN_KEYS: usize = 4096;
 
 /// Tunable detection thresholds.
 #[derive(Debug, Clone)]
@@ -43,6 +44,8 @@ pub struct DetectConfig {
     pub disabled_rules: HashSet<String>,
     /// Compiled custom expression rules from a YAML pack.
     pub custom_rules: Vec<CustomRule>,
+    /// Suppress repeat alerts for the same `(rule, src)` within this many ms (0 = off).
+    pub alert_cooldown_ms: u64,
 }
 
 impl Default for DetectConfig {
@@ -66,6 +69,7 @@ impl Default for DetectConfig {
             dns_nxdomain_count: 30,
             disabled_rules: HashSet::new(),
             custom_rules: Vec::new(),
+            alert_cooldown_ms: 0,
         }
     }
 }
@@ -186,6 +190,10 @@ pub struct Detector {
     custom_per_src: HashSet<(String, String)>,
     /// (rule_id, track_key) -> sliding window state for correlated custom rules.
     custom_corr: HashMap<(String, String), CustomCorrBucket>,
+    /// Last emit time for `(rule, src)` cooldown keys.
+    cooldown_last: HashMap<(String, String), u64>,
+    /// Alerts dropped by cooldown.
+    suppressed: u64,
     alerts: Vec<Alert>,
 }
 
@@ -209,12 +217,19 @@ impl Detector {
             custom_once: HashSet::new(),
             custom_per_src: HashSet::new(),
             custom_corr: HashMap::new(),
+            cooldown_last: HashMap::new(),
+            suppressed: 0,
             alerts: Vec::new(),
         }
     }
 
     pub fn alerts(&self) -> &[Alert] {
         &self.alerts
+    }
+
+    /// Count of alerts suppressed by `--alert-cooldown-ms` / pack setting.
+    pub fn suppressed(&self) -> u64 {
+        self.suppressed
     }
 
     /// Ingest one decoded packet. Returns new alerts raised for this packet.
@@ -861,6 +876,20 @@ impl Detector {
         if !self.cfg.rule_enabled(rule) {
             return;
         }
+        let cooldown = self.cfg.alert_cooldown_ms;
+        if cooldown > 0 {
+            let key = (rule.to_string(), src.to_string());
+            if let Some(&last) = self.cooldown_last.get(&key) {
+                if ts_unix_ms.saturating_sub(last) < cooldown {
+                    self.suppressed = self.suppressed.saturating_add(1);
+                    return;
+                }
+            }
+            if self.cooldown_last.len() < MAX_COOLDOWN_KEYS || self.cooldown_last.contains_key(&key)
+            {
+                self.cooldown_last.insert(key, ts_unix_ms);
+            }
+        }
         self.alerts.push(Alert {
             ts_unix_ms,
             rule: rule.into(),
@@ -954,6 +983,52 @@ mod tests {
         let src = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
         let alerts = det.observe(&syn_pkt(src, 31337), 1);
         assert!(alerts.iter().any(|a| a.rule == "rare_port"));
+    }
+
+    #[test]
+    fn cooldown_suppresses_repeat_rule_src() {
+        use crate::packet::DnsInfo;
+        let cfg = DetectConfig {
+            dns_long_name: 10,
+            alert_cooldown_ms: 5_000,
+            ..DetectConfig::default()
+        };
+        let mut det = Detector::new(cfg);
+        let src = IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7));
+        let long = "a".repeat(20);
+        let pkt = DecodedPacket {
+            ip: Some(IpInfo {
+                src,
+                dst: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                version: 4,
+                protocol: 17,
+                ttl: Some(64),
+                total_len: Some(60),
+            }),
+            transport: Some(TransportInfo::Udp(crate::packet::UdpInfo {
+                src_port: 53_000,
+                dst_port: 53,
+                length: 40,
+                payload_len: 32,
+            })),
+            app: Some(AppInfo::Dns(DnsInfo {
+                is_query: true,
+                id: 1,
+                questions: vec![long],
+                answers: vec![],
+                rcode: None,
+            })),
+            ..Default::default()
+        };
+        let first = det.observe(&pkt, 1_000);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].rule, "dns_long_name");
+        let second = det.observe(&pkt, 2_000);
+        assert!(second.is_empty());
+        assert_eq!(det.suppressed(), 1);
+        let third = det.observe(&pkt, 7_000);
+        assert_eq!(third.len(), 1);
+        assert_eq!(det.alerts().len(), 2);
     }
 
     #[test]

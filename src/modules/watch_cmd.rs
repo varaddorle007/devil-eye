@@ -125,6 +125,9 @@ pub fn run(args: &WatchArgs) -> Result<()> {
     if let Some(n) = args.dns_nxdomain_count {
         cfg.dns_nxdomain_count = n;
     }
+    if let Some(ms) = args.alert_cooldown_ms {
+        cfg.alert_cooldown_ms = ms;
+    }
 
     let state = Arc::new(Mutex::new(DashState::new(
         source_label,

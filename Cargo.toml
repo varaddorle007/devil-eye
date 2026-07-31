@@ -1,6 +1,6 @@
 [package]
 name = "devil-eye"
-version = "0.30.0"
+version = "0.40.0"
 edition = "2021"
 description = "Authorized cybersecurity toolkit: tcpdump-class capture + modular scoped assessment"
 license = "MIT"
@@ -9,7 +9,8 @@ keywords = ["pcap", "packet-capture", "security", "scanner", "network"]
 categories = ["command-line-utilities", "network-programming"]
 
 [features]
-default = []
+# Live capture is on by default (Npcap/libpcap). Offline-only: --no-default-features
+default = ["live"]
 # Live capture / interface listing / driver-side BPF via Npcap (Windows) or libpcap (Unix).
 live = ["dep:pcap"]
 
@@ -26,7 +27,9 @@ native-tls = "0.2"
 x509-parser = "0.16"
 pcap = { version = "2", optional = true }
 serde_yaml = "0.9"
+enable-ansi-support = "0.2"
 md-5 = "0.10"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,6 +3,8 @@ name: lab-strict
 description: Stricter thresholds for controlled lab engagements
 version: 1
 window_secs: 20
+# Optional: suppress noisy repeat (rule, src) alerts within N ms
+# alert_cooldown_ms: 5000
 
 thresholds:
   syn_scan_ports: 8

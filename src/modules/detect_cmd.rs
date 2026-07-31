@@ -25,6 +25,7 @@ struct DetectReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules_pack: Option<String>,
     pub alerts: Vec<crate::detect::Alert>,
+    pub suppressed_by_cooldown: u64,
 }
 
 /// Run detection over a capture source described by DetectArgs.
@@ -51,6 +52,7 @@ pub fn run(args: &DetectArgs) -> Result<()> {
             "read": args.read.as_ref().map(|p| p.display().to_string()),
             "filter": args.filter,
             "syn_scan_ports": args.syn_scan_ports,
+            "alert_cooldown_ms": args.alert_cooldown_ms,
             "host_sweep_hosts": args.host_sweep_hosts,
             "icmp_echo_count": args.icmp_echo_count,
             "dns_unique_names": args.dns_unique_names,
@@ -123,6 +125,9 @@ pub fn run(args: &DetectArgs) -> Result<()> {
     if let Some(n) = args.dns_nxdomain_count {
         cfg.dns_nxdomain_count = n;
     }
+    if let Some(ms) = args.alert_cooldown_ms {
+        cfg.alert_cooldown_ms = ms;
+    }
     let mut detector = Detector::new(cfg);
 
     let mut packets = 0u64;
@@ -182,6 +187,7 @@ pub fn run(args: &DetectArgs) -> Result<()> {
         packets,
         rules_pack: pack_name.clone(),
         alerts: detector.alerts().to_vec(),
+        suppressed_by_cooldown: detector.suppressed(),
     };
 
     if let Some(path) = &args.json_out {
@@ -197,8 +203,9 @@ pub fn run(args: &DetectArgs) -> Result<()> {
 
     writeln!(
         io::stderr(),
-        "detect complete: packets={packets} alerts={} (audited -> {})",
+        "detect complete: packets={packets} alerts={} suppressed={} (audited -> {})",
         report.alerts.len(),
+        report.suppressed_by_cooldown,
         audit.path().display()
     )?;
 
@@ -210,6 +217,7 @@ pub fn run(args: &DetectArgs) -> Result<()> {
         serde_json::json!({
             "packets": packets,
             "alerts": report.alerts.len(),
+            "suppressed_by_cooldown": report.suppressed_by_cooldown,
             "rules_pack": pack_name,
             "siem_emitted": siem.as_ref().map(|e| e.emitted()),
         }),

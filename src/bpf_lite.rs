@@ -2,8 +2,11 @@
 //!
 //! Supported primitives (case-insensitive):
 //! - protocols: `ip`, `ip6`, `arp`, `tcp`, `udp`, `icmp`, `icmp6`
+//! - `vlan` (any 802.1Q tag) / `vlan N` (VID 0–4095)
 //! - `[src|dst] port N`, `[src|dst] portrange N-M`
 //! - `[src|dst] host ADDR`, `[src|dst] net CIDR`
+//! - TCP flags: `tcp-syn`, `tcp-ack`, `tcp-fin`, `tcp-rst`, `tcp-psh`, `tcp-urg`, `tcp-synack`
+//! - length: `less N`, `greater N` (Ethernet frame byte length)
 //! - combinators: `and` / `&&`, `or` / `||`, `not` / `!`, parentheses
 //!
 //! Chained forms like `udp port 53` and `tcp dst port 80` are supported.
@@ -50,7 +53,7 @@ impl PacketFilter {
         let Ok(decoded) = decode_packet(frame) else {
             return false;
         };
-        eval(&self.root, &decoded)
+        eval(&self.root, &decoded, frame.len())
     }
 }
 
@@ -65,6 +68,18 @@ enum Expr {
     PortRange { dir: Dir, lo: u16, hi: u16 },
     Host { dir: Dir, addr: IpAddr },
     Net { dir: Dir, net: IpNet },
+    /// Any VLAN tag (`None`) or a specific VID (`Some`).
+    Vlan { id: Option<u16> },
+    TcpFlags {
+        syn: Option<bool>,
+        ack: Option<bool>,
+        fin: Option<bool>,
+        rst: Option<bool>,
+        psh: Option<bool>,
+        urg: Option<bool>,
+    },
+    Less(usize),
+    Greater(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +169,56 @@ impl Parser<'_> {
     }
 
     fn parse_primitive(&mut self) -> Result<Expr> {
+        if matches!(
+            self.peek().map(str::to_ascii_lowercase).as_deref(),
+            Some("less")
+        ) {
+            self.bump();
+            let n = self
+                .bump()
+                .ok_or_else(|| anyhow::anyhow!("expected length after less"))?
+                .parse::<usize>()
+                .context("invalid less length")?;
+            return Ok(Expr::Less(n));
+        }
+        if matches!(
+            self.peek().map(str::to_ascii_lowercase).as_deref(),
+            Some("greater")
+        ) {
+            self.bump();
+            let n = self
+                .bump()
+                .ok_or_else(|| anyhow::anyhow!("expected length after greater"))?
+                .parse::<usize>()
+                .context("invalid greater length")?;
+            return Ok(Expr::Greater(n));
+        }
+        if let Some(flags) = self.peek().and_then(tcp_flag_shortcut) {
+            self.bump();
+            return Ok(Expr::And(
+                Box::new(Expr::Proto(ProtoKind::Tcp)),
+                Box::new(flags),
+            ));
+        }
+
+        // `vlan` / `vlan N` stand alone (not chained with proto like `udp port`).
+        if matches!(
+            self.peek().map(str::to_ascii_lowercase).as_deref(),
+            Some("vlan")
+        ) {
+            self.bump();
+            if let Some(tok) = self.peek() {
+                if let Ok(id) = tok.parse::<u16>() {
+                    if id > 4095 {
+                        bail!("VLAN id {id} out of range (0-4095)");
+                    }
+                    self.bump();
+                    return Ok(Expr::Vlan { id: Some(id) });
+                }
+            }
+            return Ok(Expr::Vlan { id: None });
+        }
+
         let mut protos = Vec::new();
         while let Some(kind) = self.peek().and_then(proto_kind) {
             self.bump();
@@ -213,7 +278,7 @@ impl Parser<'_> {
             let tok = self.peek().unwrap_or("<eof>");
             bail!(
                 "expected filter primitive near '{tok}' \
-                 (examples: 'udp port 53', 'tcp', 'host 1.2.3.4')"
+                 (examples: 'udp port 53', 'vlan 100', 'tcp-syn', 'host 1.2.3.4')"
             );
         }
 
@@ -230,6 +295,70 @@ fn fold_and(parts: Vec<Expr>) -> Expr {
         .into_iter()
         .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)))
         .unwrap_or(Expr::True)
+}
+
+fn tcp_flag_shortcut(tok: &str) -> Option<Expr> {
+    let lower = tok.to_ascii_lowercase();
+    let flags = match lower.as_str() {
+        "tcp-syn" | "tcp[syn]" => Expr::TcpFlags {
+            syn: Some(true),
+            ack: Some(false),
+            fin: None,
+            rst: None,
+            psh: None,
+            urg: None,
+        },
+        "tcp-ack" => Expr::TcpFlags {
+            syn: None,
+            ack: Some(true),
+            fin: None,
+            rst: None,
+            psh: None,
+            urg: None,
+        },
+        "tcp-fin" => Expr::TcpFlags {
+            syn: None,
+            ack: None,
+            fin: Some(true),
+            rst: None,
+            psh: None,
+            urg: None,
+        },
+        "tcp-rst" => Expr::TcpFlags {
+            syn: None,
+            ack: None,
+            fin: None,
+            rst: Some(true),
+            psh: None,
+            urg: None,
+        },
+        "tcp-psh" => Expr::TcpFlags {
+            syn: None,
+            ack: None,
+            fin: None,
+            rst: None,
+            psh: Some(true),
+            urg: None,
+        },
+        "tcp-urg" => Expr::TcpFlags {
+            syn: None,
+            ack: None,
+            fin: None,
+            rst: None,
+            psh: None,
+            urg: Some(true),
+        },
+        "tcp-synack" | "tcp-syn-ack" => Expr::TcpFlags {
+            syn: Some(true),
+            ack: Some(true),
+            fin: None,
+            rst: None,
+            psh: None,
+            urg: None,
+        },
+        _ => return None,
+    };
+    Some(flags)
 }
 
 fn proto_kind(tok: &str) -> Option<ProtoKind> {
@@ -312,17 +441,39 @@ fn tokenize(expr: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
-fn eval(expr: &Expr, pkt: &DecodedPacket) -> bool {
+fn eval(expr: &Expr, pkt: &DecodedPacket, frame_len: usize) -> bool {
     match expr {
         Expr::True => true,
-        Expr::And(a, b) => eval(a, pkt) && eval(b, pkt),
-        Expr::Or(a, b) => eval(a, pkt) || eval(b, pkt),
-        Expr::Not(a) => !eval(a, pkt),
+        Expr::And(a, b) => eval(a, pkt, frame_len) && eval(b, pkt, frame_len),
+        Expr::Or(a, b) => eval(a, pkt, frame_len) || eval(b, pkt, frame_len),
+        Expr::Not(a) => !eval(a, pkt, frame_len),
         Expr::Proto(kind) => match_proto(*kind, pkt),
         Expr::Port { dir, port } => match_port(*dir, |p| p == *port, pkt),
         Expr::PortRange { dir, lo, hi } => match_port(*dir, |p| p >= *lo && p <= *hi, pkt),
         Expr::Host { dir, addr } => match_host(*dir, *addr, pkt),
         Expr::Net { dir, net } => match_net(*dir, *net, pkt),
+        Expr::Vlan { id: None } => pkt.vlan.is_some(),
+        Expr::Vlan { id: Some(want) } => pkt.vlan == Some(*want),
+        Expr::TcpFlags {
+            syn,
+            ack,
+            fin,
+            rst,
+            psh,
+            urg,
+        } => match &pkt.transport {
+            Some(TransportInfo::Tcp(t)) => {
+                syn.is_none_or(|v| t.flags.syn == v)
+                    && ack.is_none_or(|v| t.flags.ack == v)
+                    && fin.is_none_or(|v| t.flags.fin == v)
+                    && rst.is_none_or(|v| t.flags.rst == v)
+                    && psh.is_none_or(|v| t.flags.psh == v)
+                    && urg.is_none_or(|v| t.flags.urg == v)
+            }
+            _ => false,
+        },
+        Expr::Less(n) => frame_len < *n,
+        Expr::Greater(n) => frame_len > *n,
     }
 }
 
@@ -429,5 +580,70 @@ mod tests {
     fn empty_matches_all() {
         let f = PacketFilter::parse("").unwrap();
         assert!(f.matches(&frame("dns_query.pcap")));
+    }
+
+    /// Minimal Ethernet + 802.1Q + IPv4/UDP frame (VID in TCI).
+    fn vlan_udp_frame(vid: u16) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]); // dst
+        frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // src
+        frame.extend_from_slice(&0x8100u16.to_be_bytes()); // 802.1Q
+        frame.extend_from_slice(&(vid & 0x0fff).to_be_bytes()); // TCI
+        frame.extend_from_slice(&0x0800u16.to_be_bytes()); // IPv4
+        // IPv4 header (20 bytes) + UDP (8) + payload
+        let mut ip = vec![
+            0x45, 0x00, 0x00, 0x1c, // ver/ihl, tos, total len 28
+            0x00, 0x01, 0x00, 0x00, // id, flags
+            0x40, 0x11, 0x00, 0x00, // ttl, proto UDP, checksum
+            10, 0, 0, 1, // src
+            10, 0, 0, 2, // dst
+        ];
+        // UDP
+        ip.extend_from_slice(&53u16.to_be_bytes());
+        ip.extend_from_slice(&53_000u16.to_be_bytes());
+        ip.extend_from_slice(&8u16.to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        frame.extend_from_slice(&ip);
+        frame
+    }
+
+    #[test]
+    fn vlan_any_and_id_match() {
+        let tagged = vlan_udp_frame(100);
+        let untagged = frame("dns_query.pcap");
+
+        let any = PacketFilter::parse("vlan").unwrap();
+        assert!(any.matches(&tagged));
+        assert!(!any.matches(&untagged));
+
+        let id100 = PacketFilter::parse("vlan 100").unwrap();
+        assert!(id100.matches(&tagged));
+        assert!(!id100.matches(&vlan_udp_frame(200)));
+
+        let combo = PacketFilter::parse("vlan 100 and udp").unwrap();
+        assert!(combo.matches(&tagged));
+        assert!(!PacketFilter::parse("vlan 100 and tcp").unwrap().matches(&tagged));
+    }
+
+    #[test]
+    fn vlan_id_out_of_range() {
+        let err = PacketFilter::parse("vlan 4096").unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn parses_tcp_syn_shortcut() {
+        let f = PacketFilter::parse("tcp-syn").unwrap();
+        // established HTTP GET is not a lone SYN
+        assert!(!f.matches(&frame("http_get.pcap")));
+    }
+
+    #[test]
+    fn parses_less_greater() {
+        let dns = frame("dns_query.pcap");
+        let f = PacketFilter::parse(&format!("greater {}", dns.len() - 1)).unwrap();
+        assert!(f.matches(&dns));
+        let f2 = PacketFilter::parse(&format!("less {}", dns.len())).unwrap();
+        assert!(!f2.matches(&dns));
     }
 }

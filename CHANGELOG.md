@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.40.0 - 2026-07-31
+
+### Added
+- **Live capture on by default** (`default = ["live"]`); offline-only builds use `--no-default-features`
+- Windows helper `scripts/build-release.ps1` (downloads Npcap SDK + release build)
+- CI/release install libpcap / Npcap SDK so shipped binaries include live support
+- Offline filter: `tcp-syn` / `tcp-ack` / `tcp-fin` / `tcp-rst` / `tcp-psh` / `tcp-urg` / `tcp-synack`, plus `less N` / `greater N`
+- `scan --proto tcp|udp|both` — UDP datagram probes (best-effort; timeout ⇒ `open|filtered`)
+- Enum TLS leaf `fingerprint_sha256` + `signature_algorithm`; report `tls_note` states no HTTPS decrypt
+- Centered evil-eye ASCII (tip aligned to block midpoint) on Windows / Linux / macOS
+- `scripts/build-release.sh` for Linux/macOS libpcap builds; CI installs libpcap on macOS too
+
+### Clarified (still not shipped — by design)
+- No exploit payloads, shells, or password cracking
+- No HTTPS application-data decryption / MITM
+- No raw SYN-stealth scanner (needs packet injection; use TCP connect + UDP probe)
+
+## 0.39.0 - 2026-07-31
+
+### Added
+- Red ANSI evil-eye splash with **DEVIL EYE** title above the art
+- Interactive console when launched with no subcommand: numbered module menu, pick by number/name, Enter runs the example
+- `--no-color` / `NO_COLOR` to disable red eye and bold menu text
+- Windows console ANSI enable via `enable-ansi-support`
+
+### Changed
+- Subcommand is optional; bare `devil-eye` opens the picker loop (`q` to quit)
+
+## 0.38.0 - 2026-07-31
+
+### Added
+- Evil-eye ASCII startup banner (name + version + module tease)
+- Prints to stderr on interactive runs; skip with `--no-banner` or when stderr is piped
+
+## 0.37.0 - 2026-07-31
+
+### Added
+- `slice` command: cut an offline PCAP / PCAPNG by Unix-time window (`--after` / `--before`)
+- `--after SECS` inclusive, `--before SECS` exclusive (at least one required)
+- `-w` selects classical PCAP or PCAPNG by extension; audited runs
+
+## 0.36.0 - 2026-07-31
+
+### Added
+- Offline `-f` VLAN filters: `vlan` (any 802.1Q tag) and `vlan N` (VID 0–4095)
+- Combinable with other primitives (e.g. `vlan 100 and udp port 53`)
+
+## 0.35.0 - 2026-07-31
+
+### Added
+- `merge` command: chronologically merge two or more offline PCAP / PCAPNG files
+- `-w` selects classical PCAP or PCAPNG by extension (same as capture)
+- Equal timestamps preserve input-file order; audited runs
+
+## 0.34.0 - 2026-07-31
+
+### Added
+- Capture without `-n` maps well-known ports to service names (`domain`, `https`, `ssh`, …)
+- Static table only — no DNS / no network lookups; `-n` keeps numeric ports
+- Addresses remain numeric either way
+
+## 0.33.0 - 2026-07-31
+
+### Added
+- Capture timestamp styles like tcpdump: `-t` (none), `-tt` (unix), `-ttt` (delta), `-tttt` (absolute UTC)
+- Default (no `-t`) remains unix `secs.usecs`
+
+## 0.32.0 - 2026-07-31
+
+### Added
+- Capture `-w` can write **PCAPNG** when the path ends with `.pcapng` (SHB + IDB + Enhanced Packet blocks)
+- Other extensions still write classical PCAP
+- Round-trip unit test for PCAPNG write → offline read
+
+## 0.31.0 - 2026-07-31
+
+### Added
+- Detect/watch alert cooldown: `--alert-cooldown-ms` and YAML `alert_cooldown_ms`
+- Suppresses repeat alerts for the same `(rule, src)` within the window (0 = off)
+- JSON report / finish audit include `suppressed_by_cooldown`
+
 ## 0.30.0 - 2026-07-31
 
 ### Added
@@ -63,7 +144,7 @@
 - Fixture: `tests/fixtures/dns_query.pcapng`
 
 ### Notes
-- `-w` still writes classical PCAP only
+- `-w` still writes classical PCAP only (PCAPNG write landed in 0.32)
 
 ## 0.22.0 - 2026-07-31
 

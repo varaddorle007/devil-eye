@@ -11,14 +11,25 @@ use clap::{Parser, Subcommand};
     name = "devil-eye",
     version,
     about = "Authorized cybersecurity toolkit (capture + scoped assessment)",
-    long_about = "Devil Eye combines tcpdump-class packet analysis with Metasploit-style \
-modular assessment — but ONLY for networks you own or have written authorization to test.\n\n\
+    long_about = "Devil Eye is an authorized cybersecurity toolkit: packet capture/analysis \
+plus scoped assessment modules.\n\n\
+Use ONLY on networks you own or have written authorization to test.\n\
 It does NOT ship exploit payloads, credential theft, malware, or unauthorized access tools.\n\
-Active modules require a signed-off scope file and write an audit log."
+Active modules require a signed-off scope file and write an audit log.\n\n\
+Run with no subcommand for the interactive console menu.",
+    subcommand_required = false
 )]
 pub struct Cli {
+    /// Skip the evil-eye startup banner
+    #[arg(long = "no-banner", global = true)]
+    pub no_banner: bool,
+
+    /// Disable ANSI colors (red eye / bold menu)
+    #[arg(long = "no-color", global = true)]
+    pub no_color: bool,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -39,6 +50,10 @@ pub enum Commands {
     Import(ImportArgs),
     /// Compare two detect-compatible alert JSON reports
     Diff(DiffArgs),
+    /// Chronologically merge offline PCAP / PCAPNG files
+    Merge(MergeArgs),
+    /// Slice an offline PCAP / PCAPNG by Unix-time window
+    Slice(SliceArgs),
     /// Multi-operator engagement session (create/join/notes)
     Session(SessionArgs),
     /// Assemble Markdown/HTML/JSON engagement evidence pack
@@ -62,7 +77,7 @@ pub struct CaptureArgs {
     #[arg(short = 'r', long = "read", value_name = "FILE")]
     pub read: Option<PathBuf>,
 
-    /// Write packets to a classical PCAP file
+    /// Write packets to a classical PCAP or PCAPNG file (`.pcapng` extension → PCAPNG)
     #[arg(short = 'w', long = "write", value_name = "FILE")]
     pub write: Option<PathBuf>,
 
@@ -70,13 +85,18 @@ pub struct CaptureArgs {
     #[arg(short = 'c', long = "count")]
     pub count: Option<u64>,
 
-    /// Packet filter (tcpdump-like subset offline; full BPF on live with `--features live`)
+    /// Packet filter (offline: tcpdump-like subset incl. vlan; full BPF on live with `--features live`)
     #[arg(short = 'f', long = "filter", value_name = "EXPR")]
     pub filter: Option<String>,
 
-    /// Don't convert addresses / ports to names
+    /// Don't convert ports to service names (addresses stay numeric either way; no DNS)
     #[arg(short = 'n', long = "numeric")]
     pub numeric: bool,
+
+    /// Timestamp style like tcpdump: `-t` none, `-tt` unix, `-ttt` delta, `-tttt` absolute UTC
+    /// (default / zero: unix `secs.usecs`)
+    #[arg(short = 't', action = clap::ArgAction::Count)]
+    pub timestamp: u8,
 
     /// Increase verbosity (-v, -vv)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
@@ -127,12 +147,25 @@ pub struct CaptureArgs {
     pub audit_log: PathBuf,
 }
 
-/// Authorized connect-scan flags (Metasploit-style auxiliary module).
+/// Authorized connect-scan flags (scoped auxiliary module).
+/// Probe protocol for authorized scan (no SYN-stealth / no exploits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+pub enum ScanProto {
+    #[default]
+    Tcp,
+    Udp,
+    Both,
+}
+
 #[derive(Debug, Parser, Clone)]
 pub struct ScanArgs {
     /// Mandatory authorization scope file (JSON)
     #[arg(long = "scope", value_name = "FILE", required = true)]
     pub scope: PathBuf,
+
+    /// Probe protocol: tcp (connect), udp (datagram), or both
+    #[arg(long = "proto", value_enum, default_value_t = ScanProto::Tcp)]
+    pub proto: ScanProto,
 
     /// Append-only audit log path (JSONL)
     #[arg(
@@ -190,7 +223,7 @@ pub struct DetectArgs {
     #[arg(short = 'r', long = "read", value_name = "FILE")]
     pub read: Option<PathBuf>,
 
-    /// Packet filter (tcpdump-like subset offline; full BPF on live with `--features live`)
+    /// Packet filter (offline: tcpdump-like subset incl. vlan; full BPF on live with `--features live`)
     #[arg(short = 'f', long = "filter", value_name = "EXPR")]
     pub filter: Option<String>,
 
@@ -258,6 +291,10 @@ pub struct DetectArgs {
     #[arg(long = "dns-nxdomain-count")]
     pub dns_nxdomain_count: Option<usize>,
 
+    /// Suppress repeat alerts for the same rule+src within this many milliseconds (0 = off)
+    #[arg(long = "alert-cooldown-ms")]
+    pub alert_cooldown_ms: Option<u64>,
+
     /// Stream alerts to a SIEM file (jsonl / cef / syslog lines)
     #[arg(long = "siem-out", value_name = "FILE")]
     pub siem_out: Option<PathBuf>,
@@ -290,6 +327,7 @@ impl DetectArgs {
             count: self.count,
             filter: self.filter.clone(),
             numeric: true,
+            timestamp: 0,
             verbose: 0,
             stats: false,
             quiet: true,
@@ -485,6 +523,62 @@ pub struct DiffArgs {
     /// Exit non-zero when any alerts are gone or new
     #[arg(long = "fail-on-diff")]
     pub fail_on_diff: bool,
+
+    /// Optional scope file (ticket/operator stamped in audit)
+    #[arg(long = "scope", value_name = "FILE")]
+    pub scope: Option<PathBuf>,
+
+    /// Append-only audit log path (JSONL)
+    #[arg(
+        long = "audit-log",
+        value_name = "FILE",
+        default_value = "devil-eye-audit.jsonl"
+    )]
+    pub audit_log: PathBuf,
+}
+
+/// Chronologically merge two or more offline PCAP / PCAPNG files.
+#[derive(Debug, Parser, Clone)]
+pub struct MergeArgs {
+    /// Output capture path (`.pcapng` → PCAPNG, otherwise classical PCAP)
+    #[arg(short = 'w', long = "write", value_name = "FILE", required = true)]
+    pub write: PathBuf,
+
+    /// Input PCAP / PCAPNG files (at least two)
+    #[arg(required = true, num_args = 2.., value_name = "FILE")]
+    pub inputs: Vec<PathBuf>,
+
+    /// Optional scope file (ticket/operator stamped in audit)
+    #[arg(long = "scope", value_name = "FILE")]
+    pub scope: Option<PathBuf>,
+
+    /// Append-only audit log path (JSONL)
+    #[arg(
+        long = "audit-log",
+        value_name = "FILE",
+        default_value = "devil-eye-audit.jsonl"
+    )]
+    pub audit_log: PathBuf,
+}
+
+/// Slice an offline PCAP / PCAPNG by Unix timestamp window.
+#[derive(Debug, Parser, Clone)]
+pub struct SliceArgs {
+    /// Input PCAP / PCAPNG
+    #[arg(short = 'r', long = "read", value_name = "FILE", required = true)]
+    pub read: PathBuf,
+
+    /// Output path (`.pcapng` → PCAPNG, otherwise classical PCAP)
+    #[arg(short = 'w', long = "write", value_name = "FILE", required = true)]
+    pub write: PathBuf,
+
+    /// Keep packets with timestamp_secs >= AFTER (Unix seconds)
+    #[arg(long = "after", value_name = "SECS")]
+    pub after: Option<u32>,
+
+    /// Keep packets with timestamp_secs < BEFORE (Unix seconds)
+    #[arg(long = "before", value_name = "SECS")]
+    pub before: Option<u32>,
 
     /// Optional scope file (ticket/operator stamped in audit)
     #[arg(long = "scope", value_name = "FILE")]

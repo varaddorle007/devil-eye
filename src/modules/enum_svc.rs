@@ -28,6 +28,9 @@ pub struct TlsCertMeta {
     pub not_after: String,
     pub san: Vec<String>,
     pub serial: String,
+    /// SHA-256 of the DER certificate (handshake leaf only).
+    pub fingerprint_sha256: String,
+    pub signature_algorithm: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +50,8 @@ pub struct EnumReport {
     pub ticket_id: String,
     pub operator: String,
     pub module: String,
+    /// Explicit: we never decrypt HTTPS application data.
+    pub tls_note: String,
     pub hosts: usize,
     pub results: Vec<EnumResult>,
 }
@@ -106,6 +111,8 @@ pub fn run(args: &EnumArgs) -> Result<()> {
         ticket_id: scope.ticket_id.clone(),
         operator: scope.operator.clone(),
         module: "enum/banner_tls".into(),
+        tls_note: "TLS handshake certificate metadata only — HTTPS application data is NOT decrypted"
+            .into(),
         hosts: hosts.len(),
         results: results.clone(),
     };
@@ -311,12 +318,23 @@ fn enum_tls(ip: IpAddr, port: u16, stream: TcpStream) -> EnumResult {
 }
 
 fn parse_cert_meta(der: &[u8]) -> Result<TlsCertMeta> {
+    use sha2::{Digest, Sha256};
+
     let (_, cert) = X509Certificate::from_der(der).context("x509 parse")?;
     let subject = cert.subject().to_string();
     let issuer = cert.issuer().to_string();
     let not_before = cert.validity().not_before.to_string();
     let not_after = cert.validity().not_after.to_string();
     let serial = cert.raw_serial_as_string();
+    let fingerprint_sha256 = {
+        let digest = Sha256::digest(der);
+        digest
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let signature_algorithm = format!("{:?}", cert.signature_algorithm.algorithm);
 
     let mut san = Vec::new();
     if let Ok(Some(ext)) = cert.subject_alternative_name() {
@@ -335,6 +353,8 @@ fn parse_cert_meta(der: &[u8]) -> Result<TlsCertMeta> {
         not_after: sanitize(&not_after),
         san,
         serial: sanitize(&serial),
+        fingerprint_sha256,
+        signature_algorithm: sanitize(&signature_algorithm),
     })
 }
 
@@ -367,9 +387,10 @@ fn print_row(row: &EnumResult, verbose: bool) {
     }
     if let Some(tls) = &row.tls {
         line.push_str(&format!(
-            " | issuer={} not_after={}",
+            " | issuer={} not_after={} sha256={}",
             truncate(&tls.issuer, 60),
-            tls.not_after
+            tls.not_after,
+            truncate(&tls.fingerprint_sha256, 24)
         ));
     }
     if let Some(err) = &row.error {

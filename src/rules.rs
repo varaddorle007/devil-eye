@@ -22,6 +22,9 @@ pub struct RulePack {
     /// Aggregation window in seconds (scan/sweep/ICMP/RST/DHCP/NXDOMAIN).
     #[serde(default)]
     pub window_secs: Option<u64>,
+    /// Suppress repeat `(rule, src)` alerts within this many milliseconds (0 = off).
+    #[serde(default)]
+    pub alert_cooldown_ms: Option<u64>,
     #[serde(default)]
     pub thresholds: RuleThresholds,
     /// Rare destination ports. Mode controlled by `rare_ports_mode`.
@@ -87,6 +90,9 @@ impl RulePack {
         if let Some(secs) = self.window_secs {
             cfg.scan_window = Duration::from_secs(secs);
         }
+        if let Some(ms) = self.alert_cooldown_ms {
+            cfg.alert_cooldown_ms = ms;
+        }
         let t = &self.thresholds;
         if let Some(n) = t.syn_scan_ports {
             cfg.syn_scan_ports = n;
@@ -151,6 +157,7 @@ mod tests {
 name: lab-strict
 description: tighter lab pack
 window_secs: 15
+alert_cooldown_ms: 1000
 thresholds:
   syn_scan_ports: 5
   tcp_rst_count: 10
@@ -179,6 +186,7 @@ custom_rules:
         assert_eq!(cfg.syn_scan_ports, 5);
         assert_eq!(cfg.tcp_rst_count, 10);
         assert_eq!(cfg.scan_window, Duration::from_secs(15));
+        assert_eq!(cfg.alert_cooldown_ms, 1000);
         assert!(cfg.rare_ports.contains(&31337));
         assert!(!cfg.rare_ports.contains(&12345));
         assert!(cfg.rule_enabled("tcp_syn_scan"));

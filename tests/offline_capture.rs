@@ -416,6 +416,7 @@ fn cli_rejects_zero_count() {
         count: Some(0),
         filter: None,
         numeric: false,
+        timestamp: 0,
         verbose: 0,
         stats: false,
         quiet: false,
@@ -551,6 +552,166 @@ fn cli_offline_filter_udp_port() {
         !stdout.contains("HTTP") && !stdout.to_lowercase().contains("tcp"),
         "TCP/HTTP should be filtered out: {stdout}"
     );
+}
+
+#[test]
+fn cli_capture_writes_pcapng() {
+    ensure_fixtures();
+    let bin = env!("CARGO_BIN_EXE_devil-eye");
+    let src = fixtures_dir().join("dns_query.pcap");
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("copy.pcapng");
+    let audit = std::env::temp_dir().join("devil-eye-pcapng-write-audit.jsonl");
+    let output = Command::new(bin)
+        .args([
+            "capture",
+            "-r",
+            src.to_str().unwrap(),
+            "-w",
+            out.to_str().unwrap(),
+            "-q",
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run capture -w pcapng");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.exists());
+    let mut reader = OfflineSource::open(&out).unwrap();
+    let pkt = reader.next_packet().unwrap().unwrap();
+    assert!(!pkt.data.is_empty());
+    assert!(reader.next_packet().unwrap().is_none());
+}
+
+#[test]
+fn cli_capture_timestamp_styles() {
+    ensure_fixtures();
+    let bin = env!("CARGO_BIN_EXE_devil-eye");
+    let path = fixtures_dir().join("dns_query.pcap");
+    let audit = std::env::temp_dir().join("devil-eye-ts-audit.jsonl");
+
+    let none = Command::new(bin)
+        .args([
+            "capture",
+            "-r",
+            path.to_str().unwrap(),
+            "-c",
+            "1",
+            "-t",
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run -t");
+    assert!(none.status.success());
+    let none_out = String::from_utf8_lossy(&none.stdout);
+    assert!(
+        !none_out.chars().next().unwrap_or('x').is_ascii_digit(),
+        "expected no leading unix ts: {none_out}"
+    );
+
+    let abs = Command::new(bin)
+        .args([
+            "capture",
+            "-r",
+            path.to_str().unwrap(),
+            "-c",
+            "1",
+            "-tttt",
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run -tttt");
+    assert!(abs.status.success());
+    let abs_out = String::from_utf8_lossy(&abs.stdout);
+    assert!(
+        abs_out.contains('-') && abs_out.contains(':'),
+        "expected absolute UTC date: {abs_out}"
+    );
+}
+
+#[test]
+fn cli_capture_service_port_names() {
+    ensure_fixtures();
+    let bin = env!("CARGO_BIN_EXE_devil-eye");
+    let path = fixtures_dir().join("dns_query.pcap");
+    let audit = std::env::temp_dir().join("devil-eye-ports-audit.jsonl");
+
+    let named = Command::new(bin)
+        .args([
+            "capture",
+            "-r",
+            path.to_str().unwrap(),
+            "-c",
+            "1",
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run without -n");
+    assert!(named.status.success());
+    let named_out = String::from_utf8_lossy(&named.stdout);
+    assert!(
+        named_out.contains("domain"),
+        "expected service name domain: {named_out}"
+    );
+
+    let numeric = Command::new(bin)
+        .args([
+            "capture",
+            "-r",
+            path.to_str().unwrap(),
+            "-c",
+            "1",
+            "-n",
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run with -n");
+    assert!(numeric.status.success());
+    let num_out = String::from_utf8_lossy(&numeric.stdout);
+    assert!(
+        num_out.contains(".53") && !num_out.contains("domain"),
+        "expected numeric port 53: {num_out}"
+    );
+}
+
+#[test]
+fn cli_merge_two_pcaps() {
+    ensure_fixtures();
+    let bin = env!("CARGO_BIN_EXE_devil-eye");
+    let a = fixtures_dir().join("dns_query.pcap");
+    let b = fixtures_dir().join("http_get.pcap");
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("merged.pcap");
+    let audit = std::env::temp_dir().join("devil-eye-merge-audit.jsonl");
+    let output = Command::new(bin)
+        .args([
+            "merge",
+            "-w",
+            out.to_str().unwrap(),
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--audit-log",
+            audit.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run merge");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut src = OfflineSource::open(&out).unwrap();
+    assert!(src.next_packet().unwrap().is_some());
+    assert!(src.next_packet().unwrap().is_some());
+    assert!(src.next_packet().unwrap().is_none());
 }
 
 #[test]
