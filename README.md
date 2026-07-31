@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Devil Eye logo" width="180">
+  <img src="assets/logo.jpeg" alt="Devil Eye logo" width="180">
 </p>
 
 <h1 align="center">Devil Eye</h1>
