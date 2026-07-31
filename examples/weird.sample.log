@@ -1,0 +1,11 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	weird
+#open	2023-09-18-06-20-00
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	name	addl	notice	source
+#types	time	string	addr	port	addr	port	string	string	bool	string
+1695016400.100000	CwAboveHole1	10.0.0.9	40122	10.0.0.5	80	above_hole_data_without_any_acks	-	F	TCP
+1695016401.000000	CwChecksum1	10.0.0.9	40123	10.0.0.5	443	bad_TCP_checksum	-	F	TCP
+1695016402.500000	CwDns1	192.168.1.20	45001	8.8.8.8	53	dns_unmatched_msg	-	F	DNS

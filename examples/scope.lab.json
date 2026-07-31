@@ -1,0 +1,15 @@
+{
+  "ticket_id": "AUTH-LAB-0001",
+  "operator": "your.name",
+  "organization": "your-org-lab",
+  "authorized": true,
+  "targets": [
+    "127.0.0.1"
+  ],
+  "exclude": [],
+  "ports": [22, 80, 443, 8080],
+  "max_pps": 20,
+  "connect_timeout_ms": 800,
+  "max_hosts": 64,
+  "valid_until_unix": null
+}

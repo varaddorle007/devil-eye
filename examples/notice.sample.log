@@ -1,0 +1,11 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	notice
+#open	2023-09-18-06-13-41
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	fuid	file_mime_type	file_desc	proto	note	msg	sub	src	dst	p	n	peer_descr	actions	suppress_for	dropped
+#types	time	string	addr	port	addr	port	string	string	string	enum	enum	string	string	addr	addr	port	count	string	set[enum]	interval	bool
+1695016221.532140	CHhAvVGS1DHFjwGM9	10.0.0.50	54321	10.0.0.1	22	-	-	-	tcp	SSH::Password_Guessing	10.0.0.50 appears to be guessing SSH passwords (seen in 30 connections).	Sampled servers: 10.0.0.1/22	10.0.0.50	10.0.0.1	22	30	-	Notice::ACTION_LOG	3600.000000	F
+1695016300.100000	CxT2LW2OdTmzFMcLR7	192.168.1.20	45000	8.8.8.8	53	-	-	-	udp	DNS::NXDomain	192.168.1.20 queried for evil.example (NXDOMAIN)	evil.example	192.168.1.20	8.8.8.8	53	-	-	Notice::ACTION_LOG	-	F
+1695016405.000000	CzqR1l4nQb8VxKp2Yh	10.0.0.9	40122	10.0.0.5	445	-	-	-	tcp	Scan::Port_Scan	10.0.0.9 scanned at least 15 unique ports of host 10.0.0.5 in 0m4s	local	10.0.0.9	10.0.0.5	445	15	-	Notice::ACTION_LOG	3600.000000	F

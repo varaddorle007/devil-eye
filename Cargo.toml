@@ -1,0 +1,53 @@
+[package]
+name = "devil-eye"
+version = "0.30.0"
+edition = "2021"
+description = "Authorized cybersecurity toolkit: tcpdump-class capture + modular scoped assessment"
+license = "MIT"
+readme = "README.md"
+keywords = ["pcap", "packet-capture", "security", "scanner", "network"]
+categories = ["command-line-utilities", "network-programming"]
+
+[features]
+default = []
+# Live capture / interface listing / driver-side BPF via Npcap (Windows) or libpcap (Unix).
+live = ["dep:pcap"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+etherparse = "0.16"
+ipnet = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simple-dns = "0.9"
+native-tls = "0.2"
+x509-parser = "0.16"
+pcap = { version = "2", optional = true }
+serde_yaml = "0.9"
+md-5 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+etherparse = "0.16"
+simple-dns = "0.9"
+
+[lib]
+name = "devil_eye"
+path = "src/lib.rs"
+
+[[bin]]
+name = "devil-eye"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

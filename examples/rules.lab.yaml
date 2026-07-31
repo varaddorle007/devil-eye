@@ -1,0 +1,123 @@
+# Devil Eye IDS-lite rule pack (authorized lab use)
+name: lab-strict
+description: Stricter thresholds for controlled lab engagements
+version: 1
+window_secs: 20
+
+thresholds:
+  syn_scan_ports: 8
+  host_sweep_hosts: 12
+  dns_unique_names: 25
+  dns_long_name: 50
+  icmp_echo_count: 30
+  tcp_rst_count: 25
+  dhcp_discover_count: 12
+  dns_nxdomain_count: 20
+
+# Replace the built-in rare-port list (use rare_ports_mode: merge to extend instead)
+rare_ports_mode: replace
+rare_ports:
+  - 1337
+  - 4444
+  - 5555
+  - 6666
+  - 31337
+  - 12345
+  - 65000
+
+# Optional: silence noisy rules in this environment
+disabled_rules: []
+# Example:
+# disabled_rules:
+#   - tls_legacy_version
+
+# Custom predicate rules (safe YAML expressions — no scripts)
+custom_rules:
+  - id: ssh_alt_port
+    severity: medium
+    once: per_src
+    detail: "SSH banner on non-standard port {tcp.dst_port}"
+    when:
+      and:
+        - field: app
+          eq: ssh
+        - field: tcp.dst_port
+          not_in: [22]
+
+  - id: dns_query_outside_rfc1918
+    severity: low
+    once: per_src
+    detail: "DNS query from {ip.src} toward {ip.dst} qname={dns.qname}"
+    when:
+      and:
+        - field: dns.is_query
+          eq: true
+        - field: ip.src
+          not_in_cidr: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+  - id: tls_sni_admin
+    severity: info
+    once: once
+    detail: "TLS ClientHello SNI looks like admin ({tls.sni})"
+    when:
+      and:
+        - field: tls.sni
+          exists: true
+        - field: tls.sni
+          contains: admin
+
+  - id: tls_ja3_present
+    severity: info
+    once: per_src
+    detail: "TLS ClientHello JA3={tls.ja3_hash} sni={tls.sni}"
+    when:
+      and:
+        - field: tls.handshake
+          eq: client_hello
+        - field: tls.ja3_hash
+          exists: true
+
+  - id: tls_ja3s_present
+    severity: info
+    once: per_src
+    detail: "TLS ServerHello JA3S={tls.ja3s_hash}"
+    when:
+      and:
+        - field: tls.handshake
+          eq: server_hello
+        - field: tls.ja3s_hash
+          exists: true
+
+  # Sliding-window correlation (packet timestamps)
+  - id: syn_burst_http
+    severity: high
+    once: per_src
+    detail: "{count} SYN probes to port 80 from {ip.src} within {window_secs}s"
+    correlate:
+      window_secs: 15
+      track: by_src
+      count: 20
+    when:
+      and:
+        - field: tcp.flags.syn
+          eq: true
+        - field: tcp.flags.ack
+          eq: false
+        - field: tcp.dst_port
+          eq: 80
+
+  - id: db_port_spray
+    severity: medium
+    once: per_src
+    detail: "{unique} distinct DB ports probed by {ip.src}"
+    correlate:
+      window_secs: 30
+      track: by_src
+      unique_field: tcp.dst_port
+      unique_count: 3
+    when:
+      and:
+        - field: tcp.flags.syn
+          eq: true
+        - field: tcp.dst_port
+          in: [1433, 1521, 3306, 5432, 27017]
